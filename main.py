@@ -115,11 +115,13 @@ def startup() -> None:
     init_db()
 
 
-def auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> None:
+def auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> str:
+    """Validate Bearer token and return the authenticated context."""
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=401, detail="Invalid API key")
     if not secrets.compare_digest(credentials.credentials, API_KEY):
         raise HTTPException(status_code=401, detail="Invalid API key")
+    return credentials.credentials
 
 
 @app.get("/")
@@ -164,3 +166,4 @@ def authorize(req: AuthorizationRequest) -> AuthorizationResponse:
 @app.get("/v1/audit", dependencies=[Depends(auth)])
 def audit(limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, Any]]:
     return recent_events(limit)
+
