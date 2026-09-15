@@ -6,8 +6,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -47,7 +48,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-bearer_scheme = HTTPBearer(auto_error=False)
+bearer_scheme = HTTPBearer(description="HTTP Bearer token for API authentication")
 
 
 def init_db() -> None:
@@ -115,11 +116,13 @@ def startup() -> None:
     init_db()
 
 
-def auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> None:
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Invalid API key")
+def verify_token(credentials: HTTPAuthorizationCredentials = Security(bearer_scheme)) -> str:
+    """Verify Bearer token and return it if valid."""
+    if credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Invalid authentication scheme")
     if not secrets.compare_digest(credentials.credentials, API_KEY):
         raise HTTPException(status_code=401, detail="Invalid API key")
+    return credentials.credentials
 
 
 @app.get("/")
@@ -135,9 +138,9 @@ def health() -> dict[str, str]:
 @app.post(
     "/v1/authorize",
     response_model=AuthorizationResponse,
-    dependencies=[Depends(auth)],
+    security=[bearer_scheme],
 )
-def authorize(req: AuthorizationRequest) -> AuthorizationResponse:
+def authorize(req: AuthorizationRequest, _: str = Security(verify_token)) -> AuthorizationResponse:
     decision, reason, policy_id = evaluate(req)
     request_id = str(uuid.uuid4())
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -161,6 +164,10 @@ def authorize(req: AuthorizationRequest) -> AuthorizationResponse:
     )
 
 
-@app.get("/v1/audit", dependencies=[Depends(auth)])
-def audit(limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, Any]]:
+@app.get(
+    "/v1/audit",
+    security=[bearer_scheme],
+)
+def audit(limit: int = Query(default=50, ge=1, le=200), _: str = Security(verify_token)) -> list[dict[str, Any]]:
     return recent_events(limit)
+
