@@ -6,8 +6,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 Decision = Literal["allow", "deny", "approval_required"]
@@ -34,13 +35,25 @@ READ_ACTIONS = {"db.read", "file.read", "crm.read", "calendar.read"}
 DB_PATH = Path(os.getenv("AGENTOS_DB_PATH", "/app/agentos.db"))
 API_KEY = os.getenv("AGENTOS_API_KEY", "demo-agent-key")
 
-app = FastAPI(title="AgentOS", version="0.1.0", description="Authorization + audit gateway for AI-agent actions")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(
+    title="AgentOS",
+    version="0.1.0",
+    description="Authorization + audit gateway for AI-agent actions",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def init_db() -> None:
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS audit_events (
                 request_id TEXT PRIMARY KEY,
                 timestamp TEXT NOT NULL,
@@ -53,19 +66,23 @@ def init_db() -> None:
                 reason TEXT NOT NULL,
                 policy_id TEXT NOT NULL
             )
-        """)
+            """
+        )
         conn.commit()
 
 
 def write_event(event: dict[str, Any]) -> None:
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
+        conn.execute(
+            """
             INSERT INTO audit_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            event["request_id"], event["timestamp"], event["agent_id"], event["action"],
-            event["resource"], event["risk"], event["amount"], event["decision"],
-            event["reason"], event["policy_id"],
-        ))
+            """,
+            (
+                event["request_id"], event["timestamp"], event["agent_id"], event["action"],
+                event["resource"], event["risk"], event["amount"], event["decision"],
+                event["reason"], event["policy_id"],
+            ),
+        )
         conn.commit()
 
 
@@ -91,37 +108,58 @@ def evaluate(req: AuthorizationRequest) -> tuple[Decision, str, str]:
         return "allow", "Action is within the starter least-privilege policy.", "starter-v1"
     return "deny", "No matching policy rule; default deny.", "starter-v1"
 
+
 @app.on_event("startup")
 def startup() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     init_db()
 
 
-def auth(authorization: str | None = Header(default=None)) -> None:
-    expected = f"Bearer {API_KEY}"
-    if not authorization or not secrets.compare_digest(authorization, expected):
+def auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> None:
+    if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=401, detail="Invalid API key")
+    if not secrets.compare_digest(credentials.credentials, API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
 
 @app.get("/")
 def root() -> dict[str, str]:
     return {"service": "AgentOS", "status": "ok", "docs": "/docs", "health": "/health"}
 
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "agentos", "version": "0.1.0"}
 
-@app.post("/v1/authorize", response_model=AuthorizationResponse, dependencies=[Depends(auth)])
+
+@app.post(
+    "/v1/authorize",
+    response_model=AuthorizationResponse,
+    dependencies=[Depends(auth)],
+)
 def authorize(req: AuthorizationRequest) -> AuthorizationResponse:
     decision, reason, policy_id = evaluate(req)
     request_id = str(uuid.uuid4())
     timestamp = datetime.now(timezone.utc).isoformat()
     write_event({
-        "request_id": request_id, "timestamp": timestamp, "agent_id": req.agent_id,
-        "action": req.action, "resource": req.resource, "risk": req.risk,
-        "amount": req.amount, "decision": decision, "reason": reason,
+        "request_id": request_id,
+        "timestamp": timestamp,
+        "agent_id": req.agent_id,
+        "action": req.action,
+        "resource": req.resource,
+        "risk": req.risk,
+        "amount": req.amount,
+        "decision": decision,
+        "reason": reason,
         "policy_id": policy_id,
     })
-    return AuthorizationResponse(decision=decision, reason=reason, policy_id=policy_id, request_id=request_id)
+    return AuthorizationResponse(
+        decision=decision,
+        reason=reason,
+        policy_id=policy_id,
+        request_id=request_id,
+    )
+
 
 @app.get("/v1/audit", dependencies=[Depends(auth)])
 def audit(limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, Any]]:
