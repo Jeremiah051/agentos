@@ -9,6 +9,7 @@ from typing import Any, Literal
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
 
 Decision = Literal["allow", "deny", "approval_required"]
@@ -33,7 +34,10 @@ FINANCIAL_ACTIONS = {"payment.send", "payment.refund", "payout.create", "purchas
 HIGH_RISK_ACTIONS = {"email.send", "message.send", "code.execute", "production.deploy"}
 READ_ACTIONS = {"db.read", "file.read", "crm.read", "calendar.read"}
 DB_PATH = Path(os.getenv("AGENTOS_DB_PATH", "/app/agentos.db"))
-API_KEY = os.getenv("AGENTOS_API_KEY", "demo-agent-key")
+API_KEY = os.getenv("AGENTOS_API_KEY", None)
+
+if not API_KEY:
+    raise ValueError("AGENTOS_API_KEY environment variable is required and must not be empty")
 
 app = FastAPI(
     title="AgentOS",
@@ -164,3 +168,33 @@ def authorize(req: AuthorizationRequest) -> AuthorizationResponse:
 @app.get("/v1/audit", dependencies=[Depends(auth)])
 def audit(limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, Any]]:
     return recent_events(limit)
+
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    
+    openapi_schema = get_openapi(
+        title="AgentOS",
+        version="0.1.0",
+        description="Authorization + audit gateway for AI-agent actions",
+        routes=app.routes,
+    )
+    
+    openapi_schema["components"]["securitySchemes"] = {
+        "HTTPBearer": {
+            "type": "http",
+            "scheme": "bearer",
+            "description": "Bearer token authentication",
+        }
+    }
+    
+    openapi_schema["paths"]["/v1/authorize"]["post"]["security"] = [{"HTTPBearer": []}]
+    openapi_schema["paths"]["/v1/audit"]["get"]["security"] = [{"HTTPBearer": []}]
+    
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
+
